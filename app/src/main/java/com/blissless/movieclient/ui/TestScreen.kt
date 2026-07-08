@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.blissless.movieclient.data.MediaType
 import com.blissless.movieclient.data.ScrapeResult
+import com.blissless.movieclient.data.TmdbApi
 import com.blissless.movieclient.viewmodel.TestViewModel
 import java.util.concurrent.TimeUnit
 
@@ -128,6 +129,14 @@ fun TestScreen(
 
             // ---- 2. Input mode ----
             SectionHeader("Input")
+
+            // TMDB key status banner — shown at the top of the input section so
+            // the user can immediately see if the key is loaded, malformed, or
+            // missing. Previously there was zero visibility into this; "invalid
+            // api key" errors from TMDB were indistinguishable from "key not
+            // loaded at all".
+            TmdbKeyStatusBanner(state.tmdbKeyInfo)
+
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Pill("TMDB ID", state.inputMode == TestViewModel.InputMode.TMDB_ID) {
                     viewModel.setInputMode(TestViewModel.InputMode.TMDB_ID)
@@ -240,9 +249,38 @@ private fun NameSearchBlock(
             loading = state.isSearching,
             icon = Icons.Rounded.Refresh,
         )
-        state.searchError?.let {
-            Text(it, color = ChizukiError, fontSize = 12.sp)
+
+        // Errors take priority — show them prominently with a red border so
+        // they're impossible to miss. Previously these were swallowed silently
+        // inside TmdbApi.searchMulti, which made it look like the search button
+        // just did nothing.
+        state.searchError?.let { err ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(ChizukiError.copy(alpha = 0.08f))
+                    .border(1.dp, ChizukiError.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                    .padding(10.dp),
+            ) {
+                Text("Search failed", color = ChizukiError, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(err, color = ChizukiError, fontSize = 11.sp, fontFamily = MonoFamily, lineHeight = 14.sp)
+            }
         }
+
+        // Empty-result hint: only show after a search has actually finished,
+        // not on initial render. Without this, a successful but zero-result
+        // search looks identical to "I haven't searched yet".
+        if (!state.isSearching && state.searchError == null && state.lastSearchQuery != null && state.searchResults.isEmpty()) {
+            Text(
+                "No results for \"${state.lastSearchQuery}\".",
+                color = ChizukiOnBgMuted,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(vertical = 4.dp),
+            )
+        }
+
         if (state.searchResults.isNotEmpty()) {
             SectionHeader("Results (${state.searchResults.size})")
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -286,6 +324,73 @@ private fun NameSearchBlock(
                     modifier = Modifier.weight(1f),
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun TmdbKeyStatusBanner(info: TmdbApi.KeyDebugInfo) {
+    // Determine the status color and label.
+    val healthy = info.loaded && info.diagnosis.isBlank()
+    val color = when {
+        !info.loaded -> ChizukiWarn
+        healthy -> ChizukiSuccess
+        else -> ChizukiError
+    }
+    val statusLabel = when {
+        !info.loaded -> "NOT LOADED"
+        healthy -> "OK"
+        info.looksLikeV4Token -> "WRONG KEY TYPE (v4 token?)"
+        else -> "SUSPICIOUS"
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(color.copy(alpha = 0.08f))
+            .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+            .padding(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(color.copy(alpha = 0.15f))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            ) {
+                Text(statusLabel, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold, fontFamily = MonoFamily)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "TMDB API KEY",
+                color = ChizukiOnBgMuted,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 1.5.sp,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                if (info.loaded) "len=${info.length}  ${info.preview}" else "(empty)",
+                color = ChizukiOnBgFaint,
+                fontSize = 11.sp,
+                fontFamily = MonoFamily,
+            )
+        }
+        if (info.diagnosis.isNotBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Text(info.diagnosis, color = color, fontSize = 11.sp, lineHeight = 14.sp)
+        }
+        if (healthy) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "If TMDB still rejects requests with this key, do a clean rebuild: " +
+                    "Build → Clean Project, then Build → Rebuild Project. " +
+                    "BuildConfig fields are baked at compile time — editing local.properties alone won't update an existing APK.",
+                color = ChizukiOnBgMuted,
+                fontSize = 10.sp,
+                lineHeight = 13.sp,
+            )
         }
     }
 }

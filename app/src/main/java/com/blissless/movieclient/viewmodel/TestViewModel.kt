@@ -36,7 +36,7 @@ class TestViewModel(app: Application) : AndroidViewModel(app) {
     private val extMgr = ExtensionManager(app)
     private val tmdb = TmdbApi()
 
-    private val _ui = MutableStateFlow(UiState())
+    private val _ui = MutableStateFlow(UiState(tmdbKeyInfo = tmdb.keyDebugInfo()))
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     fun refreshExtensions() {
@@ -58,20 +58,24 @@ class TestViewModel(app: Application) : AndroidViewModel(app) {
     fun setTmdbIdInput(v: String) = _ui.update { it.copy(tmdbIdInput = v.filter { c -> c.isDigit() }) }
     fun setSeasonInput(v: String) = _ui.update { it.copy(seasonInput = v.filter { c -> c.isDigit() }) }
     fun setEpisodeInput(v: String) = _ui.update { it.copy(episodeInput = v.filter { c -> c.isDigit() }) }
-    fun setSearchQuery(v: String) = _ui.update { it.copy(searchQuery = v, searchResults = emptyList(), selectedSearchResult = null) }
+    fun setSearchQuery(v: String) = _ui.update {
+        it.copy(searchQuery = v, searchResults = emptyList(), selectedSearchResult = null, lastSearchQuery = null, searchError = null)
+    }
     fun markExtensionsDirty() = _ui.update { it.copy(extensionsDirty = true) }
 
     fun runSearch() {
         val q = _ui.value.searchQuery.trim()
         if (q.isBlank()) return
-        if (!tmdb.isConfigured()) {
-            _ui.update { it.copy(searchError = "TMDB_API_KEY is not set. Add it to local.properties and rebuild.") }
-            return
-        }
-        _ui.update { it.copy(isSearching = true, searchError = null) }
+        _ui.update { it.copy(isSearching = true, searchError = null, searchResults = emptyList(), selectedSearchResult = null, lastSearchQuery = q) }
         viewModelScope.launch {
-            val results = withContext(Dispatchers.IO) { tmdb.searchMulti(q) }
-            _ui.update { it.copy(isSearching = false, searchResults = results) }
+            try {
+                val results = withContext(Dispatchers.IO) { tmdb.searchMulti(q) }
+                _ui.update { it.copy(isSearching = false, searchResults = results, searchError = null) }
+            } catch (e: TmdbApi.TmdbException) {
+                _ui.update { it.copy(isSearching = false, searchError = e.message ?: "Unknown TMDB error", searchResults = emptyList()) }
+            } catch (e: Exception) {
+                _ui.update { it.copy(isSearching = false, searchError = "${e.javaClass.simpleName}: ${e.message}", searchResults = emptyList()) }
+            }
         }
     }
 
@@ -87,9 +91,10 @@ class TestViewModel(app: Application) : AndroidViewModel(app) {
     fun runScrape() {
         val s = _ui.value
         val ext = s.selectedExt ?: return
-        val title: String
-        val tmdbId: Int
 
+        // Validate inputs synchronously first — these don't need IO.
+        val tmdbId: Int
+        val titleFromSearch: String?  // non-null only in NAME_SEARCH mode
         when (s.inputMode) {
             InputMode.TMDB_ID -> {
                 val id = s.tmdbIdInput.toIntOrNull()
@@ -98,11 +103,7 @@ class TestViewModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
                 tmdbId = id
-                title = if (tmdb.isConfigured()) {
-                    tmdb.fetchMetadata(id, s.mediaType)?.title ?: "Unknown Title $id"
-                } else {
-                    "Unknown Title $id"
-                }
+                titleFromSearch = null
             }
             InputMode.NAME_SEARCH -> {
                 val picked = s.selectedSearchResult
@@ -110,24 +111,56 @@ class TestViewModel(app: Application) : AndroidViewModel(app) {
                     _ui.update { it.copy(scrapeResult = ScrapeResult.Error("Pick a search result first.", 0)) }
                     return
                 }
-                title = picked.title
+                titleFromSearch = picked.title
                 tmdbId = picked.id
             }
         }
 
-        val season = if (s.mediaType == MediaType.TV) s.seasonInput.toIntOrNull() else null
-        val episode = if (s.mediaType == MediaType.TV) s.episodeInput.toIntOrNull() else null
-
-        val request = ScrapeRequest(
-            title = title,
-            tmdbId = tmdbId,
-            mediaType = s.mediaType,
-            season = season,
-            episode = episode,
-        )
-
-        _ui.update { it.copy(isScraping = true, lastRequest = request) }
+        _ui.update { it.copy(isScraping = true, scrapeResult = null, lastRequest = null) }
         viewModelScope.launch {
+            // Resolve the title (TMDB_ID mode only — NAME_SEARCH already has it).
+            // Surface TMDB errors instead of falling back to "Unknown Title <id>",
+            // because that placeholder guarantees the extension won't find a match
+            // and masks the real problem (bad API key, network, wrong mediaType).
+            val title: String = try {
+                if (titleFromSearch != null) {
+                    titleFromSearch
+                } else {
+                    withContext(Dispatchers.IO) { tmdb.fetchMetadata(tmdbId, s.mediaType) }.title
+                }
+            } catch (e: TmdbApi.TmdbException) {
+                _ui.update {
+                    it.copy(
+                        isScraping = false,
+                        scrapeResult = ScrapeResult.Error(
+                            "TMDB metadata lookup failed — scrape aborted.\n\n${e.message}", 0
+                        ),
+                    )
+                }
+                return@launch
+            } catch (e: Exception) {
+                _ui.update {
+                    it.copy(
+                        isScraping = false,
+                        scrapeResult = ScrapeResult.Error(
+                            "TMDB metadata lookup failed — scrape aborted.\n\n${e.javaClass.simpleName}: ${e.message}", 0
+                        ),
+                    )
+                }
+                return@launch
+            }
+
+            val season = if (s.mediaType == MediaType.TV) s.seasonInput.toIntOrNull() else null
+            val episode = if (s.mediaType == MediaType.TV) s.episodeInput.toIntOrNull() else null
+            val request = ScrapeRequest(
+                title = title,
+                tmdbId = tmdbId,
+                mediaType = s.mediaType,
+                season = season,
+                episode = episode,
+            )
+            _ui.update { it.copy(lastRequest = request) }
+
             val result = withContext(Dispatchers.IO) { extMgr.scrape(ext, request) }
             _ui.update { it.copy(isScraping = false, scrapeResult = result) }
         }
@@ -142,6 +175,8 @@ class TestViewModel(app: Application) : AndroidViewModel(app) {
         val selectedExt: InstalledExtension? = null,
         val extensionsDirty: Boolean = false,
 
+        val tmdbKeyInfo: TmdbApi.KeyDebugInfo = TmdbApi.KeyDebugInfo(false, 0, "", false, "Not checked yet."),
+
         val inputMode: InputMode = InputMode.TMDB_ID,
         val mediaType: MediaType = MediaType.MOVIE,
 
@@ -154,6 +189,7 @@ class TestViewModel(app: Application) : AndroidViewModel(app) {
         val selectedSearchResult: TmdbSearchResult? = null,
         val isSearching: Boolean = false,
         val searchError: String? = null,
+        val lastSearchQuery: String? = null,
 
         val isScraping: Boolean = false,
         val lastRequest: ScrapeRequest? = null,
