@@ -1,0 +1,7 @@
+<resources>
+    <color name="chizuki_bg">#FF0A0A0A</color>
+    <color name="chizuki_surface">#FF141414</color>
+    <color name="chizuki_surface_variant">#FF1E1E1E</color>
+    <color name="chizuki_accent">#FF3B82F6</color>
+    <color name="chizuki_accent_alt">#FF8B5CF6</color>
+</resources>

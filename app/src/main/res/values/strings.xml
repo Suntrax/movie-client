@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">MovieClient Test</string>
+    <string name="extension_beacon_action">com.blissless.movieclient.EXTENSION_BEACON</string>
+    <string name="extension_label_prefix">Chizuki:</string>
+</resources>
